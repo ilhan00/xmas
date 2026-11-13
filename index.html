@@ -85,6 +85,28 @@
   const BRANCH_SNOW = [S('#9fb2d8'), S('#eef4ff', 3)];
   const STAR = [S('#8a6a18'), S('#ffd84a', 8), S('#fff8d0', 12)];
   const TEXT = [S('#ff4a4a', 8), S('#46e070', 8), S('#ffd44a', 8)];
+  const DOG_W = [S('#9aa0b4'), S('#d8dce8'), S('#ffffff')];
+  const DOG_T = [S('#8a5e34'), S('#c8945a'), S('#e2b47e')];
+  const DOG_E = S('#140c06');
+
+  /* ================= 강아지 (사진 속 흰 테리어, 왼쪽을 보는 옆모습) =================
+     t 갈색 털 · w 흰 털 · . 삐친 털 · E 눈 · N 코 */
+  const DOG_BODY = [
+    "  t.t     .ww.  ",
+    " ttEtw   w.  w  ",
+    "Ntttwww   .ww.  ",
+    " .wwwwwwwwwwww. ",
+    "   wwwwwwwwwww  ",
+  ];
+  const DOG_LEGS = [
+    ["   ww w   ww w  "],   // 서 있는 자세
+    ["  ww   w ww   w "],   // 한 걸음
+  ];
+  const DOG_WIDE = DOG_BODY[0].length;
+  const DOG_FUR = '%#&WM';
+  const DOG_WISP = "'`~^";
+  const DOG_TURN = 26;              // 한 바퀴 도는 시간(초)
+  const DOG_RX = 9.6, DOG_RZ = 5.0; // 트리 주위 타원 경로
 
   // IH(일한) · DY(다영) — 항상 두 글자씩 붙어서 읽히도록 짝수 열에서 시작
   const PAIR = 'IHDY';
@@ -444,7 +466,7 @@
   let t0 = performance.now(), last = t0;
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
-    const t = (now - t0) / 1000 + startOffset;
+    const t = Math.max(0, (now - t0) / 1000 + startOffset);
     const A = t / TURN * TAU, cA = Math.cos(A), sA = Math.sin(A);
 
     gCh.fill(32); gZ.fill(Infinity);
@@ -592,6 +614,45 @@
           put(i, zc - 1, 1, STAR[lvl]);
           if (starCell < 0 || Math.abs(p.lx) + Math.abs(p.lyy) < 0.1) { starCell = i; starZ = zc; }
           break;
+        }
+      }
+    }
+
+
+    /* 강아지: 트리 주위를 걸어 다님 (장면 회전과 별개로 자기 경로) */
+    {
+      const proj = (x, y, z) => {
+        const dx = x - C[0], dy = y - C[1], dz = z - C[2];
+        const zc = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
+        const xc = dx * rgt[0] + dy * rgt[1] + dz * rgt[2];
+        const yc = dx * upv[0] + dy * upv[1] + dz * upv[2];
+        return [W / 2 + F * xc / zc, cy0 - F * yc / zc, zc];
+      };
+      const phi = 1.2 + t / DOG_TURN * TAU;
+      const [fx, fy, fz] = proj(DOG_RX * Math.cos(phi), 0, DOG_RZ * Math.sin(phi));
+      const [fx2] = proj(DOG_RX * Math.cos(phi + 0.01), 0, DOG_RZ * Math.sin(phi + 0.01));
+      const faceLeft = fx2 < fx;                       // 화면에서 움직이는 방향을 바라봄
+      const step = (Math.floor(t * 7) % 2 + 2) % 2;
+      const rowsArt = DOG_BODY.concat(DOG_LEGS[step]);
+      const footRow = Math.floor((fy - oy) / chh);
+      const c0 = Math.floor((fx - ox) / cw) - (DOG_WIDE >> 1);
+      const r0 = footRow - rowsArt.length + 1;
+      for (let r = 0; r < rowsArt.length; r++) {
+        const line = rowsArt[r];
+        for (let k = 0; k < line.length; k++) {
+          const m = line[k];
+          if (m === ' ') continue;
+          const col = c0 + (faceLeft ? k : DOG_WIDE - 1 - k);
+          const row = r0 + r;
+          if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+          const h = hash2(k * 7 + r, 31);
+          let code, st;
+          if (m === 'E') { code = 111; st = DOG_E; }
+          else if (m === 'N') { code = 64; st = DOG_E; }
+          else if (m === '.') { code = DOG_WISP.charCodeAt(h * 4 | 0); st = DOG_W[r < 3 ? 1 : 0]; }
+          else if (m === 't') { code = DOG_FUR.charCodeAt(h * 5 | 0); st = DOG_T[r < 1 ? 2 : h < 0.5 ? 1 : 0]; }
+          else { code = DOG_FUR.charCodeAt(h * 5 | 0); st = DOG_W[r <= 3 ? 2 : r <= 4 ? 1 : 0]; }
+          put(row * cols + col, fz - 2.5, code, st);
         }
       }
     }
