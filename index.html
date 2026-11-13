@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Christmas</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #04060b; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c" role="img" aria-label="눈 내리는 밤, 아래에서부터 쌓여 올라가며 회전하는 ASCII 3D 크리스마스 트리와 선물상자"></canvas>
+<script>
+(() => {
+  'use strict';
+  const TAU = Math.PI * 2;
+  const FONT = '"DejaVu Sans Mono", Menlo, Consolas, "Courier New", monospace';
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+
+  /* ================= 타임라인 (초) ================= */
+  const T = {
+    treeStart: 1.5, treeDur: 6.0,   // 트리가 아래→위로 쌓임
+    decoStart: 7.8, decoDur: 4.5,   // 가랜드·전구·오너먼트가 아래→위로
+    giftStart: 10.2, giftGap: 0.35, giftDur: 0.9,
+    starStart: 12.6,
+    textStart: 13.6, textRate: 7,   // 초당 글자 수
+  };
+  const TURN = 20; // 한 바퀴(초)
+
+  // ?t=12 처럼 시작 시점을 건너뛸 수 있음
+  const startOffset = parseFloat(new URLSearchParams(location.search).get('t')) || 0;
+
+  /* ================= 색 / 스타일 ================= */
+  const styles = [], styleMap = new Map();
+  function S(color, glow = 0) {
+    const k = color + '|' + glow;
+    if (styleMap.has(k)) return styleMap.get(k);
+    styles.push({ color, glow });
+    styleMap.set(k, styles.length - 1);
+    return styles.length - 1;
+  }
+  const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  function ramp(stops, n) {
+    return Array.from({ length: n }, (_, i) => {
+      const t = i / (n - 1);
+      let k = 0;
+      while (k < stops.length - 2 && t > stops[k + 1][0]) k++;
+      const [t0, c0] = stops[k], [t1, c1] = stops[k + 1];
+      const u = (t - t0) / (t1 - t0), a = hex(c0), b = hex(c1);
+      return S('#' + a.map((v, j) => Math.round(v + (b[j] - v) * u).toString(16).padStart(2, '0')).join(''));
+    });
+  }
+
+  const GREEN = ramp([[0, '#0f4a22'], [0.5, '#25a84c'], [1, '#c0ffbc']], 9);
+  const EDGE = [S('#ffffff', 8), S('#d6ffdc', 4)];
+  const GOLD = [S('#86661c'), S('#a77c24'), S('#eabd48'), S('#ffe48e', 6)];
+  const LIGHT_ON = [S('#fff0b0', 10), S('#ffb347', 10), S('#ffe070', 10), S('#ffffff', 10), S('#ff8a5c', 10)];
+  const LIGHT_OFF = S('#7a6430');
+  const ORN = {
+    red:   [S('#8a1c1c'), S('#c42828'), S('#ff5c5c', 5)],
+    blue:  [S('#1c3a8a'), S('#2f6fd8'), S('#7fb4ff', 5)],
+    white: [S('#7c8094'), S('#c8cad8'), S('#ffffff', 5)],
+    gold:  [S('#8a6a1e'), S('#d6a63a'), S('#ffe48e', 5)],
+  };
+  const ORN_KEYS = Object.keys(ORN);
+  const GIFT = {
+    red:    [S('#7a1a1a'), S('#a51f1f'), S('#ff4a4a')],
+    blue:   [S('#1a2e78'), S('#2350b8'), S('#4f8cff')],
+    green:  [S('#14602e'), S('#1f8a44'), S('#4fe07a')],
+    purple: [S('#4a1e78'), S('#6d2fb0'), S('#b07aff')],
+    gold:   [S('#7a601a'), S('#b08a24'), S('#ffd25a')],
+  };
+  const RIB = {
+    white: [S('#6a6c7a'), S('#d4d6e2'), S('#ffffff', 4)],
+    gold:  [S('#6a5214'), S('#e0b040'), S('#fff0a0', 4)],
+    red:   [S('#5a1010'), S('#d43030'), S('#ff7070', 4)],
+  };
+  const TRUNK = [S('#4a2e16'), S('#7a4e26'), S('#b07a42')];
+  const FLOOR = [S('#182032'), S('#243049'), S('#33436a')];
+  const FLOOR_WARM = [S('#2a2412'), S('#3a3016')];
+  const SNOW = [S('#3c4660'), S('#7f8bab'), S('#e8eeff', 3)];
+  const DRIFT = [S('#2c3650'), S('#475578'), S('#6c7ca6'), S('#a3b3d8'), S('#f4f8ff', 4)];
+  const BRANCH_SNOW = [S('#9fb2d8'), S('#eef4ff', 3)];
+  const STAR = [S('#8a6a18'), S('#ffd84a', 8), S('#fff8d0', 12)];
+  const TEXT = [S('#ff4a4a', 8), S('#46e070', 8), S('#ffd44a', 8)];
+
+  // IH(일한) · DY(다영) — 항상 두 글자씩 붙어서 읽히도록 짝수 열에서 시작
+  const PAIR = 'IHDY';
+
+  /* ================= 장면 데이터 ================= */
+  let seed = 1225;
+  const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+  function hash2(a, b) {
+    let h = Math.imul(a | 0, 374761393) ^ Math.imul(b | 0, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+
+  const Y0 = 2.9, TH = 10, BASE_R = 5.0, TIERS = 7;
+  function envR(h) {
+    const base = BASE_R * Math.pow(1 - h, 0.92);
+    const f = h * TIERS - Math.floor(h * TIERS);
+    return base * (1 - 0.17 * f) + 0.06;
+  }
+
+  // type: 0 잎, 1 가랜드, 2 전구, 3 오너먼트, 4 상자, 5 리본, 6 기둥, 7 별
+  const pts = [];
+  const add = o => pts.push(o);
+
+  // 잎 (원뿔 표면 + 안쪽 볼륨)
+  for (let i = 0; i < 14000; i++) {
+    const h = 1 - Math.sqrt(rnd());
+    const th = rnd() * TAU;
+    const df = rnd() < 0.72 ? 0.88 + 0.12 * rnd() : 0.45 + 0.43 * rnd();
+    const r = envR(h) * df;
+    const c = Math.cos(th), s = Math.sin(th);
+    add({ t: 0, x: r * c, y: Y0 + h * TH + (rnd() - 0.5) * 0.14, z: r * s,
+          nx: c * 0.92, ny: 0.4, nz: s * 0.92, h, df, sd: rnd() });
+  }
+  // 기둥
+  for (let y = 0; y < Y0 + 0.8; y += 0.07)
+    for (let a = 0; a < TAU; a += 0.06) {
+      const rr = 0.8 + 0.12 * Math.max(0, 0.6 - y);   // 밑동은 살짝 넓게
+      add({ t: 6, x: rr * Math.cos(a), y, z: rr * Math.sin(a), nx: Math.cos(a), ny: 0, nz: Math.sin(a),
+            h: -0.05 + y * 0.004, sd: rnd(), bark: Math.floor(a / TAU * 16) % 2 });
+    }
+  // 가랜드 2줄 (나선)
+  for (let k = 0; k < 2; k++)
+    for (let i = 0; i < 1100; i++) {
+      const h = 0.03 + 0.9 * i / 1100;
+      const th = h * TAU * 3.3 + k * Math.PI;
+      const r = envR(h) * 0.97 + 0.08;
+      const c = Math.cos(th), s = Math.sin(th);
+      add({ t: 1, x: r * c, y: Y0 + h * TH - 0.15, z: r * s, nx: c, ny: 0.3, nz: s, h, sd: rnd() });
+    }
+  // 전구
+  let lightTotal = 0;
+  for (let i = 0; i < 180; i++) {
+    const h = clamp(1 - Math.sqrt(rnd()) * 0.97, 0.02, 0.93);
+    const th = rnd() * TAU, r = envR(h) + 0.06;
+    const c = Math.cos(th), s = Math.sin(th);
+    add({ t: 2, x: r * c, y: Y0 + h * TH, z: r * s, nx: c, ny: 0.3, nz: s, h, sd: rnd(),
+          ci: Math.floor(rnd() * LIGHT_ON.length), ph: rnd() * TAU, sp: 1.5 + rnd() * 3 });
+    lightTotal++;
+  }
+  // 오너먼트 (작은 구)
+  for (let i = 0; i < 55; i++) {
+    const h = 0.05 + rnd() * 0.82;
+    const th = rnd() * TAU, r = envR(h) + 0.05;
+    const cx = r * Math.cos(th), cy = Y0 + h * TH, cz = r * Math.sin(th);
+    const col = ORN_KEYS[Math.floor(rnd() * ORN_KEYS.length)];
+    for (let j = 0; j < 14; j++) {
+      const u = rnd() * TAU, v = Math.acos(2 * rnd() - 1), rr = 0.17;
+      const nx = Math.sin(v) * Math.cos(u), ny = Math.cos(v), nz = Math.sin(v) * Math.sin(u);
+      add({ t: 3, x: cx + nx * rr, y: cy + ny * rr, z: cz + nz * rr, nx, ny, nz, h, sd: rnd(), col });
+    }
+  }
+  // 선물상자 (트리와 함께 회전)
+  const gifts = [
+    { a: 0.35, d: 5.1, w: 1.6, dd: 1.5, hh: 1.35, rot: 0.3, col: 'red',    rib: 'gold'  },
+    { a: 1.55, d: 5.4, w: 1.1, dd: 1.1, hh: 1.75, rot: 0.9, col: 'blue',   rib: 'white' },
+    { a: 2.6,  d: 5.0, w: 1.9, dd: 1.3, hh: 0.95, rot: 0.1, col: 'green',  rib: 'red'   },
+    { a: 3.7,  d: 5.3, w: 1.3, dd: 1.3, hh: 1.2,  rot: 0.7, col: 'purple', rib: 'gold'  },
+    { a: 4.75, d: 5.0, w: 1.5, dd: 1.1, hh: 1.5,  rot: 1.2, col: 'red',    rib: 'white' },
+    { a: 5.6,  d: 5.7, w: 1.0, dd: 1.0, hh: 0.85, rot: 0.4, col: 'gold',   rib: 'red'   },
+  ];
+  gifts.forEach((g, gi) => {
+    const gx = g.d * Math.cos(g.a), gz = g.d * Math.sin(g.a);
+    const cr = Math.cos(g.rot), sr = Math.sin(g.rot);
+    const hw = g.w / 2, hd = g.dd / 2, RW = 0.13, ST = 0.065;
+    const P = (u, y, v, nu, ny, nv, rib) => add({
+      t: rib ? 5 : 4, g: gi, ly: y,
+      x: gx + u * cr - v * sr, y, z: gz + u * sr + v * cr,
+      nx: nu * cr - nv * sr, ny, nz: nu * sr + nv * cr, sd: rnd(),
+    });
+    for (let u = -hw; u <= hw; u += ST)
+      for (let v = -hd; v <= hd; v += ST)
+        P(u, g.hh, v, 0, 1, 0, Math.abs(u) < RW || Math.abs(v) < RW);
+    for (let y = 0; y <= g.hh; y += ST) {
+      for (let v = -hd; v <= hd; v += ST) { P(hw, y, v, 1, 0, 0, Math.abs(v) < RW); P(-hw, y, v, -1, 0, 0, Math.abs(v) < RW); }
+      for (let u = -hw; u <= hw; u += ST) { P(u, y, hd, 0, 0, 1, Math.abs(u) < RW); P(u, y, -hd, 0, 0, -1, Math.abs(u) < RW); }
+    }
+    // 리본 매듭
+    for (const sx of [-1, 1])
+      for (let j = 0; j < 60; j++) {
+        const u = rnd() * TAU, v = Math.acos(2 * rnd() - 1);
+        const nx = Math.sin(v) * Math.cos(u), ny = Math.cos(v), nz = Math.sin(v) * Math.sin(u);
+        P(sx * 0.17 + nx * 0.15, g.hh + 0.14 + ny * 0.12, nz * 0.1, nx, ny, nz, true);
+      }
+  });
+  // 별
+  const STAR_Y = Y0 + TH + 0.35;
+  const starPoly = Array.from({ length: 10 }, (_, i) => {
+    const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 0.34 : 0.85;
+    return [r * Math.cos(a), -r * Math.sin(a)];
+  });
+  function inPoly(x, y, poly) {
+    let ins = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) ins = !ins;
+    }
+    return ins;
+  }
+  for (let x = -0.9; x <= 0.9; x += 0.045)
+    for (let y = -0.9; y <= 0.9; y += 0.045)
+      if (inPoly(x, y, starPoly))
+        for (const z of [-0.07, 0.07])
+          add({ t: 7, x, y: STAR_Y + y, z, nx: 0, ny: 0, nz: Math.sign(z), sd: rnd(), lx: x, lyy: y });
+
+  // 부드러운 2D 값 노이즈 (눈 쌓임 분포)
+  function vnoise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const a = hash2(xi, yi), b = hash2(xi + 1, yi), c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  }
+  const snowField = (x, z) => 0.7 * vnoise(x * 0.16 + 11, z * 0.16 + 7) + 0.3 * vnoise(x * 0.42 - 3, z * 0.42 + 19);
+
+
+  /* ================= 캐롤 (MIDI 음 번호 → Web Audio 오르골) =================
+     We Wish You a Merry Christmas (전래 캐롤, 퍼블릭 도메인) — G장조, 3/4박자
+     [MIDI 음 번호, 박자 수]. 60 = 가운데 도(C4) */
+  const SONG = {
+    bpm: 168,
+    melody: [
+      [62, 1],
+      [67, 1], [67, .5], [69, .5], [67, .5], [66, .5],
+      [64, 1], [64, 1], [64, 1],
+      [69, 1], [69, .5], [71, .5], [69, .5], [67, .5],
+      [66, 1], [62, 1], [62, 1],
+      [71, 1], [71, .5], [72, .5], [71, .5], [69, .5],
+      [67, 1], [64, 1], [62, .5], [62, .5],
+      [64, 1], [69, 1], [66, 1],
+      [67, 2], [62, 1],
+      [67, 1], [67, 1], [67, 1],
+      [66, 2], [66, 1],
+      [67, 1], [66, 1], [64, 1],
+      [62, 2], [69, 1],
+      [71, 1], [69, 1], [67, 1],
+      [74, 1], [62, 1], [62, .5], [62, .5],
+      [64, 1], [69, 1], [66, 1],
+      [67, 2],
+    ],
+    // 마디별 화음 [근음, 3음 간격] — 첫 박(못갖춘마디) 다음부터 3박씩
+    chords: [
+      [43, 4], [48, 4], [45, 4], [50, 4], [47, 4], [52, 3], [50, 4], [43, 4],
+      [43, 4], [50, 4], [52, 3], [50, 4], [43, 4], [47, 3], [50, 4], [43, 4],
+    ],
+  };
+
+  const music = (() => {
+    let ac = null, bus = null, master = null, wet = null, timer = null;
+    let muted = false, startTime = 0;
+    const spb = 60 / SONG.bpm;
+    // 이벤트 목록 (박 단위)
+    const events = [];
+    let beat = 0;
+    for (const [n, d] of SONG.melody) { events.push({ b: beat, n, d, kind: 'mel' }); beat += d; }
+    const LOOP = beat;
+    SONG.chords.forEach(([root, third], k) => {
+      const b = 1 + k * 3;
+      events.push({ b, n: root, d: 3, kind: 'bass' });
+      for (const off of [12, 12 + third, 19]) {
+        events.push({ b: b + 1, n: root + off, d: 0.9, kind: 'pad' });
+        events.push({ b: b + 2, n: root + off, d: 0.9, kind: 'pad' });
+      }
+    });
+    events.sort((a, b) => a.b - b.b);
+
+    const freq = n => 440 * Math.pow(2, (n - 69) / 12);
+
+    function reverb() {
+      const len = ac.sampleRate * 2.2, buf = ac.createBuffer(2, len, ac.sampleRate);
+      for (let c = 0; c < 2; c++) {
+        const d = buf.getChannelData(c);
+        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+      }
+      const cv = ac.createConvolver(); cv.buffer = buf; return cv;
+    }
+
+    function voice(time, ev) {
+      const f = freq(ev.n);
+      const g = ac.createGain();
+      g.connect(master);
+      const partials = ev.kind === 'mel'
+        ? [[1, 'sine', 0.22], [2, 'sine', 0.06], [3.01, 'triangle', 0.025]]   // 오르골
+        : ev.kind === 'bass' ? [[1, 'triangle', 0.16], [2, 'sine', 0.03]]
+        : [[1, 'sine', 0.035]];
+      const decay = ev.kind === 'mel' ? 1.4 : ev.kind === 'bass' ? 1.6 : 0.6;
+      const end = time + decay + 0.1;
+      g.gain.setValueAtTime(0.0001, time);
+      g.gain.exponentialRampToValueAtTime(1, time + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, end);
+      for (const [mul, type, amp] of partials) {
+        const o = ac.createOscillator(), og = ac.createGain();
+        o.type = type; o.frequency.value = f * mul; og.gain.value = amp;
+        o.connect(og).connect(g);
+        o.start(time); o.stop(end);
+      }
+    }
+
+    let nextIdx = 0, loopBase = 0;
+    function schedule() {
+      const ahead = ac.currentTime + 0.2;
+      while (true) {
+        const ev = events[nextIdx];
+        const time = startTime + (loopBase + ev.b) * spb;
+        if (time > ahead) break;
+        if (time > ac.currentTime - 0.05) voice(time, ev);
+        nextIdx++;
+        if (nextIdx >= events.length) { nextIdx = 0; loopBase += LOOP; }
+      }
+    }
+
+    return {
+      get running() { return !!ac && ac.state === 'running'; },
+      unlock() { if (ac && ac.state !== 'running') ac.resume(); },
+      get muted() { return muted; },
+      start() {
+        if (!ac) {
+          ac = new (window.AudioContext || window.webkitAudioContext)();
+          // 버스: bus → (dry + reverb) → 스피커
+          bus = ac.createGain(); bus.gain.value = muted ? 0 : 0.55;
+          const dry = ac.createGain(); dry.gain.value = 0.8;
+          wet = ac.createGain(); wet.gain.value = 0.35;
+          bus.connect(dry).connect(ac.destination);
+          bus.connect(reverb()).connect(wet).connect(ac.destination);
+        }
+        ac.resume();
+        // 이전 재생분은 빠르게 페이드아웃하고 새 세션으로 처음부터
+        if (master) master.gain.setTargetAtTime(0, ac.currentTime, 0.04);
+        master = ac.createGain(); master.connect(bus);
+        startTime = ac.currentTime + 0.1; nextIdx = 0; loopBase = 0;
+        clearInterval(timer);
+        timer = setInterval(schedule, 25);
+        schedule();
+      },
+      toggleMute() {
+        muted = !muted;
+        if (bus) bus.gain.setTargetAtTime(muted ? 0 : 0.55, ac.currentTime, 0.05);
+      },
+    };
+  })();
+
+  /* ================= 화면 / 카메라 ================= */
+  let W, H, dpr, fs, cw, chh, cols, rows, ox, oy, N;
+  let gCh, gSt, gZ;
+  let floorX, floorZ, floorD, floorOK;
+  let sprites = new Map();
+  let F, cy0;
+  const DIST = 27, ELEV = 12 * Math.PI / 180, LOOK_Y = 7.0;
+  const C = [0, LOOK_Y + DIST * Math.sin(ELEV), DIST * Math.cos(ELEV)];
+  const fwd = (() => { const v = [0 - C[0], LOOK_Y - C[1], 0 - C[2]]; const n = Math.hypot(...v); return v.map(a => a / n); })();
+  const rgt = (() => { const v = [-fwd[2], 0, fwd[0]]; const n = Math.hypot(...v); return v.map(a => a / n); })();
+  const upv = [rgt[1] * fwd[2] - rgt[2] * fwd[1], rgt[2] * fwd[0] - rgt[0] * fwd[2], rgt[0] * fwd[1] - rgt[1] * fwd[0]];
+  const L = (() => { const v = [-0.55, 0.6, 0.6]; const n = Math.hypot(...v); return v.map(a => a / n); })();
+
+  function resize() {
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    fs = Math.round(clamp(H / 60, 8, 15));
+    ctx.font = `${fs}px ${FONT}`;
+    cw = ctx.measureText('M').width;
+    if (W / cw < 90) { fs = Math.max(6, Math.floor(fs * (W / cw) / 90)); ctx.font = `${fs}px ${FONT}`; cw = ctx.measureText('M').width; }
+    chh = Math.round(fs * 1.15);
+    cols = Math.floor(W / cw); rows = Math.floor(H / chh);
+    ox = (W - cols * cw) / 2; oy = (H - rows * chh) / 2;
+    N = cols * rows;
+    gCh = new Uint8Array(N); gSt = new Uint16Array(N); gZ = new Float32Array(N);
+    sprites = new Map();
+
+    F = Math.min(0.72 * H * DIST / 12.5, 0.98 * W * DIST / 19);
+    cy0 = H * 0.45;
+
+    // 바닥 평면: 셀마다 시선과 y=0 평면의 교점을 미리 계산
+    floorX = new Float32Array(N); floorZ = new Float32Array(N); floorD = new Float32Array(N); floorOK = new Uint8Array(N);
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const a = (ox + (c + 0.5) * cw - W / 2) / F, b = -(oy + (r + 0.5) * chh - cy0) / F;
+        const dx = fwd[0] + rgt[0] * a + upv[0] * b;
+        const dy = fwd[1] + rgt[1] * a + upv[1] * b;
+        const dz = fwd[2] + rgt[2] * a + upv[2] * b;
+        if (dy >= -1e-3) continue;
+        const t = -C[1] / dy;
+        const hx = C[0] + dx * t, hz = C[2] + dz * t;
+        if (hx * hx + hz * hz > 48 * 48) continue;
+        floorX[i] = hx; floorZ[i] = hz; floorD[i] = t * Math.hypot(dx, dy, dz); floorOK[i] = 1;
+      }
+    initSnow();
+  }
+
+  function sprite(code, st) {
+    const key = st * 128 + code;
+    let sp = sprites.get(key);
+    if (sp) return sp;
+    const sty = styles[st];
+    const pad = sty.glow ? Math.ceil(sty.glow * 1.6) : 0;
+    const c = document.createElement('canvas');
+    c.width = Math.ceil((cw + pad * 2) * dpr); c.height = Math.ceil((chh + pad * 2) * dpr);
+    const g = c.getContext('2d');
+    g.scale(dpr, dpr);
+    g.font = `${fs}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = sty.color;
+    const ch = String.fromCharCode(code);
+    if (sty.glow) { g.shadowColor = sty.color; g.shadowBlur = sty.glow; g.fillText(ch, pad + cw / 2, pad + chh / 2); g.shadowBlur = 0; }
+    g.fillText(ch, pad + cw / 2, pad + chh / 2);
+    sp = { c, pad, glow: !!sty.glow };
+    sprites.set(key, sp);
+    return sp;
+  }
+
+  /* ================= 눈 ================= */
+  let flakes = [];
+  function newFlake(anywhere) {
+    const layer = Math.random() < 0.5 ? 0 : Math.random() < 0.65 ? 1 : 2;
+    const ch = layer === 0 ? '.' : layer === 1 ? (Math.random() < 0.6 ? '+' : '.') : (Math.random() < 0.7 ? '+' : '*');
+    return {
+      x: Math.random() * cols, y: anywhere ? Math.random() * rows : -1 - Math.random() * 4,
+      vy: [1.6, 3.2, 6][layer] * (0.7 + Math.random() * 0.6),
+      ph: Math.random() * TAU, fr: 0.4 + Math.random(), layer, ch: ch.charCodeAt(0),
+    };
+  }
+  function initSnow() {
+    flakes = Array.from({ length: Math.round(cols * rows * 0.09) }, () => newFlake(true));
+  }
+
+  /* ================= 프레임 ================= */
+  function cellOf(px, py) {
+    const c = Math.floor((px - ox) / cw), r = Math.floor((py - oy) / chh);
+    if (c < 0 || c >= cols || r < 0 || r >= rows) return -1;
+    return r * cols + c;
+  }
+  function put(i, z, code, st) {
+    if (i >= 0 && z < gZ[i]) { gZ[i] = z; gCh[i] = code; gSt[i] = st; }
+  }
+  const CH = s => s.charCodeAt(0);
+
+  let t0 = performance.now(), last = t0;
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    const t = (now - t0) / 1000 + startOffset;
+    const A = t / TURN * TAU, cA = Math.cos(A), sA = Math.sin(A);
+
+    gCh.fill(32); gZ.fill(Infinity);
+
+    const treeFront = clamp((t - T.treeStart) / T.treeDur) * 1.12 - 0.04;
+    const decoFront = clamp((t - T.decoStart) / T.decoDur) * 1.12 - 0.04;
+    const decoOn = decoFront > 0;
+    // 눈 쌓임 진행도: 처음엔 거의 없다가 20초에 걸쳐 쌓임
+    const snowAmt = clamp(0.15 + t / 22);
+    const snowThr = 0.78 - 0.36 * snowAmt;
+
+    /* 바닥 (장면과 함께 회전) */
+    for (let i = 0; i < N; i++) {
+      if (!floorOK[i]) continue;
+      const hx = floorX[i], hz = floorZ[i];
+      const xs = hx * cA + hz * sA, zs = -hx * sA + hz * cA;
+      const gx = xs / 0.75, gz = zs / 0.75;
+      const ax = Math.abs(gx - Math.round(gx)), az = Math.abs(gz - Math.round(gz));
+      const d = floorD[i];
+      const rr = hx * hx + hz * hz;
+
+      // 쌓인 눈: 시간이 지날수록 덮이는 면적이 넓어짐
+      // 트리 밑은 소복하게, 바깥은 노이즈로 군데군데
+      const n = snowField(xs, zs) + Math.max(0, 0.35 - rr / 160);
+      const cover = n - snowThr;
+      if (cover > 0) {
+        const fade = d < 22 ? 1 : d < 32 ? 0.75 : 0.5;          // 멀수록 어둡게
+        const lvl = Math.min(3, Math.floor((cover * 9 + 0.6) * fade));
+        const hs = hash2(Math.floor(xs * 2.2), Math.floor(zs * 2.2));
+        let code2 = [46, 58, 126, 126][lvl];                       // . : ~ ~
+        if (lvl === 3 && hs < 0.35) code2 = 61;           // =
+        let st = DRIFT[lvl];
+        const hp = hash2(i, 77);
+        if (d < 30 && hp > 0.99 && Math.sin(t * 3 + hp * 900) > 0.4) { code2 = 42; st = DRIFT[4]; } // 반짝임
+        gZ[i] = 1e9; gCh[i] = code2; gSt[i] = st;
+        continue;
+      }
+      let code = 0;
+      if (az < 0.16) code = 45;          // '-'
+      else if (ax < 0.16) code = 46;     // '.'
+      else if (hash2(gx * 3, gz * 3) < 0.12) code = 46;
+      if (!code) continue;
+      let st = d < 24 ? FLOOR[2] : d < 34 ? FLOOR[1] : FLOOR[0];
+      if (decoOn && rr < 36) st = rr < 20 ? FLOOR_WARM[1] : FLOOR_WARM[0];
+      gZ[i] = 1e9; gCh[i] = code; gSt[i] = st;
+    }
+
+    /* 눈 (뒤쪽 레이어) */
+    const wind = Math.sin(t * 0.13) * 0.7;
+    for (const f of flakes) {
+      f.y += f.vy * dt;
+      f.x += (Math.sin(t * f.fr + f.ph) * (0.4 + f.layer * 0.5) + wind) * dt;
+      if (f.y >= rows) Object.assign(f, newFlake(false));
+      if (f.x < 0) f.x += cols; else if (f.x >= cols) f.x -= cols;
+      if (f.layer === 2 || f.y < 0) continue;
+      const i = Math.floor(f.y) * cols + Math.floor(f.x);
+      gZ[i] = 1e9; gCh[i] = f.ch; gSt[i] = SNOW[f.layer];
+    }
+
+    /* 3D 포인트 */
+    const giftProg = gifts.map((g, gi) => clamp((t - T.giftStart - gi * T.giftGap) / T.giftDur));
+    const starProg = clamp((t - T.starStart) / 0.7);
+    const starScale = starProg <= 0 ? 0 : 1 + 2.2 * Math.pow(1 - starProg, 2) * Math.sin(starProg * 9) * 0.25 - (1 - starProg) * 0.6;
+    let lightsShown = 0;
+    let starCell = -1, starZ = 0;
+
+    for (let k = 0; k < pts.length; k++) {
+      const p = pts[k];
+      let edge = false, x = p.x, y = p.y, z = p.z;
+      const ty = p.t;
+      if (ty === 0 || ty === 6) {
+        if (p.h > treeFront) continue;
+        edge = ty === 0 && treeFront < 1.05 && treeFront - p.h < 0.04;
+      } else if (ty <= 3) {
+        if (p.h > decoFront) continue;
+        edge = decoFront < 1.05 && decoFront - p.h < 0.03;
+        if (ty === 2) lightsShown++;
+      } else if (ty <= 5) {
+        const g = gifts[p.g], pr = giftProg[p.g];
+        if (pr <= 0 || p.ly > pr * (g.hh + 0.3)) continue;
+        edge = pr < 1 && pr * (g.hh + 0.3) - p.ly < 0.1;
+      } else if (ty === 7) {
+        if (starProg <= 0) continue;
+        x = p.lx * starScale; y = STAR_Y + p.lyy * starScale; z = p.z;
+      }
+
+      // 회전 (장면 → 월드)
+      const xw = x * cA - z * sA, zw = x * sA + z * cA;
+      const dx = xw - C[0], dy = y - C[1], dz = zw - C[2];
+      const zc = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
+      if (zc < 1) continue;
+      const xc = dx * rgt[0] + dy * rgt[1] + dz * rgt[2];
+      const yc = dx * upv[0] + dy * upv[1] + dz * upv[2];
+      const i = cellOf(W / 2 + F * xc / zc, cy0 - F * yc / zc);
+      if (i < 0) continue;
+
+      const nxw = p.nx * cA - p.nz * sA, nzw = p.nx * sA + p.nz * cA;
+      const dif = nxw * L[0] + p.ny * L[1] + nzw * L[2];
+      const depthCue = clamp(1.2 - (zc - DIST + 4) / 14, 0.7, 1.1);
+
+      if (edge) { put(i, zc - 0.3, 1, EDGE[p.sd < 0.6 ? 0 : 1]); continue; }
+
+      switch (ty) {
+        case 0: {
+          let b = (0.22 + 0.7 * Math.max(0, dif)) * (0.5 + 0.5 * p.df) * depthCue + (p.sd - 0.5) * 0.3;
+          b = clamp(b, 0, 0.999);
+          if (p.df > 0.94 && p.sd > 1 - 0.12 * snowAmt && dif > -0.2) {
+            put(i, zc, dif > 0.3 ? 42 : 46, BRANCH_SNOW[dif > 0.3 ? 1 : 0]);
+            break;
+          }
+          put(i, zc, 1, GREEN[b * 9 | 0]);
+          break;
+        }
+        case 6: {
+          const b = clamp((0.3 + 0.7 * Math.max(0, dif)) * depthCue, 0, 0.999);
+          put(i, zc, 1, TRUNK[Math.min(2, b * 3 | 0)]);
+          break;
+        }
+        case 1: {
+          const b = clamp((0.25 + 0.75 * Math.max(0, dif)) * depthCue, 0, 0.999);
+          put(i, zc - 0.05, 1, GOLD[b * 4 | 0]);
+          break;
+        }
+        case 2: {
+          const fresh = decoFront - p.h < 0.12;
+          const on = fresh || Math.sin(t * p.sp + p.ph) > -0.35;
+          put(i, zc - 0.15, on ? (p.sd > 0.5 ? 79 : 111) : 111, on && dif > -0.35 ? LIGHT_ON[p.ci] : LIGHT_OFF);
+          break;
+        }
+        case 3: {
+          const b = clamp((0.2 + 0.8 * Math.max(0, dif)) * depthCue, 0, 0.999);
+          put(i, zc - 0.1, 1, ORN[p.col][b * 3 | 0]);
+          break;
+        }
+        case 4: case 5: {
+          const g = gifts[p.g];
+          const b = clamp((0.18 + 0.82 * Math.max(0, dif)) * depthCue + (p.sd - 0.5) * 0.15, 0, 0.999);
+          if (ty === 4) put(i, zc, 1, GIFT[g.col][b * 3 | 0]);
+          else put(i, zc - 0.02, 1, RIB[g.rib][b * 3 | 0]);
+          break;
+        }
+        case 7: {
+          const tw = Math.sin(t * 6 + p.sd * 20) > 0.6;
+          const lvl = tw ? 2 : (Math.abs(dif) > 0.3 || p.sd > 0.5 ? 1 : 0);
+          put(i, zc - 1, 1, STAR[lvl]);
+          if (starCell < 0 || Math.abs(p.lx) + Math.abs(p.lyy) < 0.1) { starCell = i; starZ = zc; }
+          break;
+        }
+      }
+    }
+
+    /* 별빛 (2D) */
+    if (starProg > 0) {
+      const sp = (() => {
+        const dx = -C[0], dy = STAR_Y - C[1], dz = -C[2];
+        const zc = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
+        const xc = dx * rgt[0] + dy * rgt[1] + dz * rgt[2];
+        const yc = dx * upv[0] + dy * upv[1] + dz * upv[2];
+        return [W / 2 + F * xc / zc, cy0 - F * yc / zc];
+      })();
+      const flash = clamp(1 - (t - T.starStart) / 1.5);
+      const len = 1 + Math.round(0.8 + 0.8 * Math.sin(t * 2.2)) + Math.round(flash * 5);
+      const c0 = Math.floor((sp[0] - ox) / cw), r0 = Math.floor((sp[1] - oy) / chh);
+      const rays = [[0, -1, 124, 1], [0, 1, 124, 1], [-1, 0, 45, 2.2], [1, 0, 45, 2.2], [-1, -1, 92, flash], [1, -1, 47, flash], [-1, 1, 47, flash], [1, 1, 92, flash]];
+      for (const [dc, dr, code, m] of rays) {
+        const n = Math.round(len * m);
+        for (let s = 2; s <= n + 1; s++) {
+          const c = c0 + dc * Math.round(s * (dc && dr ? 1.6 : 1)) * (dr ? 1 : 1), r = r0 + dr * Math.round(s * (dc && dr ? 0.8 : 1));
+          if (c < 0 || c >= cols || r < 0 || r >= rows) break;
+          const i = r * cols + c;
+          if (gZ[i] < 1e8 && gZ[i] < starZ - 0.5) continue;
+          gZ[i] = 0; gCh[i] = code; gSt[i] = s <= 2 ? STAR[1] : STAR[0];
+        }
+      }
+    }
+
+    /* 눈 (앞쪽 레이어) */
+    for (const f of flakes) {
+      if (f.layer !== 2 || f.y < 0) continue;
+      const i = Math.floor(f.y) * cols + Math.floor(f.x);
+      gCh[i] = f.ch; gSt[i] = SNOW[2];
+    }
+
+    /* 문구 */
+    const msg = 'M E R R Y   C H R I S T M A S   2 0 2 6';
+    if (t > T.textStart) {
+      const shown = Math.floor((t - T.textStart) * T.textRate);
+      // 선물 앞쪽 바닥 지점 바로 아래
+      const dx = -C[0], dy = -C[1], dz = 6.6 - C[2];
+      const zc = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
+      const yc = dx * upv[0] + dy * upv[1] + dz * upv[2];
+      const textRow = rows - 2; void yc;
+      const c0 = Math.floor((cols - msg.length) / 2);
+      for (let k = -2; k < msg.length + 2; k++) { const i = textRow * cols + c0 + k; if (i >= 0 && i < N) gCh[i] = 32; }
+      let li = 0;
+      for (let k = 0; k < msg.length; k++) {
+        if (msg[k] === ' ') continue;
+        if (li >= shown) break;
+        const i = textRow * cols + c0 + k;
+        if (i >= 0 && i < N) {
+          const cyc = shown > 15 ? Math.floor(t * 2) : 0;
+          gZ[i] = -1; gCh[i] = msg.charCodeAt(k); gSt[i] = TEXT[(li + cyc) % 3];
+        }
+        li++;
+      }
+    }
+
+    /* 그리기 */
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#04060b';
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    let letters = 0;
+    const glowList = [];
+    for (let i = 0; i < N; i++) {
+      let code = gCh[i];
+      if (code === 32) continue;
+      if (code === 1) { const c = i % cols, r = (i / cols) | 0; code = PAIR.charCodeAt((c + r * 2) % 4); }
+      letters++;
+      const sp = sprite(code, gSt[i]);
+      const x = (ox + (i % cols) * cw - sp.pad) * dpr, y = (oy + Math.floor(i / cols) * chh - sp.pad) * dpr;
+      if (sp.glow) glowList.push(sp.c, x, y);
+      else ctx.drawImage(sp.c, x, y);
+    }
+    ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < glowList.length; k += 3) ctx.drawImage(glowList[k], glowList[k + 1], glowList[k + 2]);
+    ctx.globalCompositeOperation = 'source-over';
+
+    /* HUD */
+    ctx.font = `${fs * dpr}px ${FONT}`;
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#5c6580';
+    const deg = ((A * 180 / Math.PI) % 360).toFixed(2);
+    const lh = chh * dpr, x0 = 1.2 * cw * dpr, yb = cv.height - lh * 0.8;
+    ctx.fillText('ascii christmas', x0, yb - lh * 2);
+    ctx.fillText(`rotation ${deg.padStart(6, ' ')}°    lights ${String(lightsShown).padStart(3, ' ')}`, x0, yb - lh);
+    ctx.fillText(`letters ${letters.toLocaleString('en-US')}`, x0, yb);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ff9a3c';
+    ctx.fillText(`● t ${t.toFixed(2).padStart(5, '0')}s`, cv.width - 1.2 * cw * dpr, lh * 1.2);
+    // 브라우저 자동재생 제한 때문에 첫 클릭에서 소리 시작
+    if (!music.running) {
+      ctx.fillStyle = Math.sin(now / 300) > -0.3 ? '#ffd44a' : '#7a6a30';
+      ctx.fillText('♪ 브라우저가 자동재생을 막았어요 — 아무 곳이나 클릭', cv.width - 1.2 * cw * dpr, yb);
+    } else {
+      ctx.fillStyle = '#5c6580';
+      ctx.fillText(music.muted ? '♪ muted  [M]' : '♪ carol  [M] mute  [click] replay', cv.width - 1.2 * cw * dpr, yb);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  // 클릭/탭 또는 R 키로 처음부터 다시
+  const replay = () => { t0 = performance.now(); music.start(); };
+  cv.addEventListener('pointerdown', replay);
+  addEventListener('keydown', e => {
+    if (e.key === 'r' || e.key === 'R') replay();
+    if (e.key === 'm' || e.key === 'M') music.toggleMute();
+  });
+  addEventListener('resize', resize);
+  resize();
+
+  // 페이지가 열리면 바로 캐롤 재생 시도.
+  // 브라우저가 자동재생을 막으면 첫 상호작용(키·터치·클릭) 때 이어서 재생.
+  music.start();
+  for (const ev of ['keydown', 'touchstart', 'pointerdown'])
+    addEventListener(ev, () => music.unlock(), { capture: true });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
