@@ -105,6 +105,59 @@
   const DOG_WIDE = DOG_BODY[0].length;
   const DOG_FUR = '%#&WM';
   const DOG_WISP = "'`~^";
+  /* ================= 고양이 (사진 속 고등어·갈색 태비, 왼쪽을 보는 옆모습) =================
+     A 귀 · d 짙은 줄무늬 · b 갈색 털 · T 줄무늬 꼬리 · E 빛나는 눈 · N 분홍 코 */
+  const CAT_BODY = [
+    "  A A        T  ",
+    " ddEd       T   ",
+    "NdddbbdbbdbbT   ",
+    " ddbbbdbbbdbbb  ",
+    "   bbdbbbdbbbb  ",
+  ];
+  const CAT_LEGS = [
+    ["   dd d   dd d  "],   // 서 있는 자세
+    ["  dd   d dd   d "],   // 한 걸음
+  ];
+  // A 귀 · E 눈 · N 코 · d 줄무늬 · b 갈색 · w 배 · t 꼬리 · L 다리 · V 거꾸로 귀
+  const CAT_POSE = {
+    loaf: [                    // 식빵 굽기
+      "  A A           ",
+      " ddEd bbbbb     ",
+      "Ndddbbbdbbbbb   ",
+      " ddbbdbbbdbbbb  ",
+      "  ttttttttdbbb  ",
+    ],
+    side: [                    // 옆으로 누움
+      "                ",
+      "                ",
+      "  A A           ",
+      "NddEdbbdbbbdbbtt",
+      "LL ddbbbbdbbbbb ",
+    ],
+    bellyA: [                  // 배 보이며 뒹굴 (다리 버둥)
+      "    L  L   L  L ",
+      "    L  L   L  L ",
+      "  wwwwwwwwwwww  ",
+      "NddEbbbdbbbdbbtt",
+      " V V            ",
+    ],
+    bellyB: [
+      "   L  L     L  L",
+      "    L  L   L  L ",
+      "  wwwwwwwwwwww  ",
+      "NddEbbbdbbbdbbtt",
+      " V V            ",
+    ],
+  };
+  const CAT_SPOT = { a: 2.08, d: 4.5 };   // 장면 좌표: 파란 선물과 초록 선물 사이
+  const CAT_CYCLE = 14;                   // 식빵 → 뒹굴 한 사이클(초)
+  const CAT_B = [S('#6e4c2c'), S('#a8784a'), S('#d0a06a')];
+  const CAT_D = [S('#3a2c22'), S('#5a4836'), S('#7a6450')];
+  const CAT_G = [S('#5a5a60'), S('#8e8e96')];
+  const CAT_E = S('#b8b860');   // 은은한 황록색, 발광 없음
+  const CAT_N = S('#e8a0a0');
+  const CAT_W = [S('#a8927a'), S('#d8c4a8')];
+
   const DOG_TURN = 26;              // 한 바퀴 도는 시간(초)
   const DOG_RX = 9.6, DOG_RZ = 5.0; // 트리 주위 타원 경로
 
@@ -619,7 +672,7 @@
     }
 
 
-    /* 강아지: 트리 주위를 걸어 다님 (장면 회전과 별개로 자기 경로) */
+    /* 강아지·고양이: 트리 주위를 걸어 다님 (장면 회전과 별개로 자기 경로) */
     {
       const proj = (x, y, z) => {
         const dx = x - C[0], dy = y - C[1], dz = z - C[2];
@@ -628,31 +681,75 @@
         const yc = dx * upv[0] + dy * upv[1] + dz * upv[2];
         return [W / 2 + F * xc / zc, cy0 - F * yc / zc, zc];
       };
-      const phi = 1.2 + t / DOG_TURN * TAU;
-      const [fx, fy, fz] = proj(DOG_RX * Math.cos(phi), 0, DOG_RZ * Math.sin(phi));
-      const [fx2] = proj(DOG_RX * Math.cos(phi + 0.01), 0, DOG_RZ * Math.sin(phi + 0.01));
-      const faceLeft = fx2 < fx;                       // 화면에서 움직이는 방향을 바라봄
-      const step = (Math.floor(t * 7) % 2 + 2) % 2;
-      const rowsArt = DOG_BODY.concat(DOG_LEGS[step]);
-      const footRow = Math.floor((fy - oy) / chh);
-      const c0 = Math.floor((fx - ox) / cw) - (DOG_WIDE >> 1);
-      const r0 = footRow - rowsArt.length + 1;
-      for (let r = 0; r < rowsArt.length; r++) {
-        const line = rowsArt[r];
-        for (let k = 0; k < line.length; k++) {
-          const m = line[k];
-          if (m === ' ') continue;
-          const col = c0 + (faceLeft ? k : DOG_WIDE - 1 - k);
-          const row = r0 + r;
-          if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
-          const h = hash2(k * 7 + r, 31);
-          let code, st;
-          if (m === 'E') { code = 111; st = DOG_E; }
-          else if (m === 'N') { code = 64; st = DOG_E; }
-          else if (m === '.') { code = DOG_WISP.charCodeAt(h * 4 | 0); st = DOG_W[r < 3 ? 1 : 0]; }
-          else if (m === 't') { code = DOG_FUR.charCodeAt(h * 5 | 0); st = DOG_T[r < 1 ? 2 : h < 0.5 ? 1 : 0]; }
-          else { code = DOG_FUR.charCodeAt(h * 5 | 0); st = DOG_W[r <= 3 ? 2 : r <= 4 ? 1 : 0]; }
-          put(row * cols + col, fz - 2.5, code, st);
+      const walker = (body, legs, phi0, stepRate, cell) => {
+        const wide = body[0].length;
+        const phi = phi0 + t / DOG_TURN * TAU;
+        const [fx, fy, fz] = proj(DOG_RX * Math.cos(phi), 0, DOG_RZ * Math.sin(phi));
+        const [fx2] = proj(DOG_RX * Math.cos(phi + 0.01), 0, DOG_RZ * Math.sin(phi + 0.01));
+        const faceLeft = fx2 < fx;                     // 화면에서 움직이는 방향을 바라봄
+        const step = (Math.floor(t * stepRate) % 2 + 2) % 2;
+        const rowsArt = body.concat(legs[step]);
+        const c0 = Math.floor((fx - ox) / cw) - (wide >> 1);
+        const r0 = Math.floor((fy - oy) / chh) - rowsArt.length + 1;
+        for (let r = 0; r < rowsArt.length; r++) {
+          const line = rowsArt[r];
+          for (let k = 0; k < line.length; k++) {
+            const m = line[k];
+            if (m === ' ') continue;
+            const col = c0 + (faceLeft ? k : wide - 1 - k);
+            const row = r0 + r;
+            if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+            const [code, st] = cell(m, r, hash2(k * 7 + r, 31), faceLeft);
+            put(row * cols + col, fz - 2.5, code, st);
+          }
+        }
+      };
+
+      // 강아지
+      walker(DOG_BODY, DOG_LEGS, 1.2, 7, (m, r, h) => {
+        if (m === 'E') return [111, DOG_E];
+        if (m === 'N') return [64, DOG_E];
+        if (m === '.') return [DOG_WISP.charCodeAt(h * 4 | 0), DOG_W[r < 3 ? 1 : 0]];
+        if (m === 't') return [DOG_FUR.charCodeAt(h * 5 | 0), DOG_T[r < 1 ? 2 : h < 0.5 ? 1 : 0]];
+        return [DOG_FUR.charCodeAt(h * 5 | 0), DOG_W[r <= 3 ? 2 : r <= 4 ? 1 : 0]];
+      });
+
+      // 고양이: 선물상자 옆에서 식빵 굽다가 가끔 뒹굴 (장면과 함께 회전)
+      {
+        const ct = ((t % CAT_CYCLE) + CAT_CYCLE) % CAT_CYCLE;
+        let pose, eyeClosed;
+        if (ct < 8 || ct >= 13) { pose = CAT_POSE.loaf; eyeClosed = (t % 3.3) < 0.2; }   // 느릿느릿 눈 깜빡
+        else if (ct < 9 || (ct >= 10.4 && ct < 11) || ct >= 12.2) { pose = CAT_POSE.side; eyeClosed = true; }
+        else { pose = Math.floor(t * 5) % 2 ? CAT_POSE.bellyA : CAT_POSE.bellyB; eyeClosed = true; }
+
+        const sx = CAT_SPOT.d * Math.cos(CAT_SPOT.a), sz = CAT_SPOT.d * Math.sin(CAT_SPOT.a);
+        const [fx, fy, fz] = proj(sx * cA - sz * sA, 0, sx * sA + sz * cA);
+        const [tx] = proj(0, 0, 0);
+        const faceLeft = fx > tx;                          // 트리 쪽을 바라봄
+        const wide = pose[0].length;
+        const c0 = Math.floor((fx - ox) / cw) - (wide >> 1);
+        const r0 = Math.floor((fy - oy) / chh) - pose.length + 1;
+        for (let r = 0; r < pose.length; r++) {
+          for (let k = 0; k < wide; k++) {
+            const m = pose[r][k];
+            if (m === ' ') continue;
+            const col = c0 + (faceLeft ? k : wide - 1 - k), row = r0 + r;
+            if (col < 0 || col >= cols || row < 0 || row >= rows) continue;
+            const h = hash2(k * 7 + r, 47);
+            let code, st;
+            switch (m) {
+              case 'A': code = 94; st = CAT_D[2]; break;                       // ^
+              case 'V': code = 118; st = CAT_D[2]; break;                      // v
+              case 'E': code = eyeClosed ? 45 : 111; st = CAT_E; break;        // - / o
+              case 'N': code = faceLeft ? 60 : 62; st = CAT_N; break;          // < >
+              case 't': code = 126; st = k % 2 ? CAT_D[1] : CAT_G[1]; break;   // ~ 줄무늬 꼬리
+              case 'L': code = r < 2 ? 124 : 95; st = CAT_D[1]; break;         // | _
+              case 'w': code = DOG_FUR.charCodeAt(h * 5 | 0); st = CAT_W[h < 0.5 ? 0 : 1]; break;
+              case 'd': code = DOG_FUR.charCodeAt(h * 5 | 0); st = CAT_D[r <= 1 ? 2 : h < 0.5 ? 1 : 0]; break;
+              default:  code = DOG_FUR.charCodeAt(h * 5 | 0); st = CAT_B[r <= 1 ? 2 : r <= 2 ? 1 : 0];
+            }
+            put(row * cols + col, fz - 0.6, code, st);
+          }
         }
       }
     }
